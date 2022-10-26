@@ -43,7 +43,7 @@ jobs:
         with:
           registry: velujay@gmail.com
           username: velublrdocker
-          password: "dckr_pat_KLh_F4KCLKtXNlTLjxN-IaCO8Eg"
+          password: dckr_pat_KLh_F4KCLKtXNlTLjxN-IaCO8Eg
       - name: Cache Docker layers
         uses: actions/cache@v2
         with:
