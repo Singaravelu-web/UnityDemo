@@ -14,7 +14,7 @@ jobs:
       ###########################
       #        Setup env        #
       ###########################
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
       - run: cat .env | sed 's/=\" *$/<<EOD/g' | sed 's/^\"/EOD/g' | grep '^[^# ]' >> $GITHUB_ENV
 
       - name: Get latest tag
@@ -25,7 +25,7 @@ jobs:
               | cut -d '/' -f 3`
           echo $LATEST_TAG
           echo "::set-output name=tag::$LATEST_TAG"
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v3
         with:
           ref: ${{ steps.latest.outputs.tag }}
 
