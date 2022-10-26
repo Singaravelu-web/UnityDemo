@@ -1,0 +1,252 @@
+name: Build Editor
+
+on:
+  workflow_dispatch:
+    inputs:
+      module:
+        description: "Unity module to build.\n(base|linux-il2cpp|windows-mono|mac-mono|ios|android|webgl)"
+        required: true
+        default: "base"
+      repoTag:
+        description: ""
+        required: true
+
+jobs:
+  setup:
+    name: Setup build matrix (${{ github.event.inputs.module }})
+    runs-on: ubuntu-18.04
+    outputs:
+      matrix: ${{ steps.setup.outputs.matrix }}
+      existTags: ${{ steps.setup.outputs.existTags }}
+      exit: ${{ steps.setup.outputs.exit }}
+    steps:
+      ###########################
+      #        Setup env        #
+      ###########################
+      - uses: actions/checkout@v2
+      - run: cat .env | sed 's/=\" *$/<<EOD/g' | sed 's/^\"/EOD/g' | grep '^[^# ]' >> $GITHUB_ENV
+
+      ###########################
+      #   Setup build matrix    #
+      ###########################
+      - name: Login to docker registry
+        uses: docker/login-action@v1
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+      - name: Setup build matrix
+        id: setup
+        run: |
+          echo "Module: ${{ github.event.inputs.module }}"
+          echo "docker: $EDITOR_IMAGE:*-${{ github.event.inputs.repoTag }}"
+
+          echo '' > EXIST_TAGS
+          skopeo list-tags docker://$EDITOR_IMAGE \
+              | jq -r '.Tags[]' \
+              | grep -e "-${{ github.event.inputs.repoTag }}$" > EXIST_TAGS || :
+
+          echo '' > .ignoreversions
+          if [ "${{ github.event.inputs.module }}" == 'base' ] ; then
+              echo -n "$IGNORED_UNITY_VERSIONS" | grep '.' > .ignoreversions
+              VERSIONS=`npx unity-changeset list --versions --min $MINIMUM_UNITY_VERSION --all \
+                  | grep -v -f .ignoreversions || :`
+          else
+              VERSIONS=`cat EXIST_TAGS \
+                  | grep -e "-base-${{ github.event.inputs.repoTag }}$" \
+                  | cut -d '-' -f 1 || :`
+          fi
+
+          VERSIONS=`for version in $(echo "$VERSIONS") ; do \
+              [ ! $(grep -x "${version}-${{ github.event.inputs.module }}-${{ github.event.inputs.repoTag }}" EXIST_TAGS) ] && echo "$version" || : ; \
+          done`
+
+          VERSIONS=`echo "$VERSIONS" | paste -s -d ',' - | sed 's/,/\", \"/g' || :`
+          [ "$VERSIONS" = '' ] && echo "::warning::No versions to build.%0A[Ignore versions]%0A`cat .ignoreversions`" && echo "::set-output name=exit::true" && exit 0
+
+          matrix="{ \
+            \"version\":[\"$VERSIONS\"], \
+            \"module\":[\"${{ github.event.inputs.module }}\"] \
+          }"
+          echo "$matrix"
+          echo "::set-output name=matrix::$matrix"
+          echo "::set-output name=existTags::`cat EXIST_TAGS`"
+          echo "::set-output name=exit::false"
+
+  build:
+    name: Build ${{ matrix.version }} ${{ matrix.module }}
+    if: needs.setup.outputs.exit != 'true'
+    needs: setup
+    runs-on: ubuntu-18.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+      # The matrix is expanded like this:
+      # matrix:
+      #   version:
+      #     - 2018.3.1f1
+      #     ...
+      #   module:
+      #     - base
+    steps:
+      ###########################
+      #        Setup env        #
+      ###########################
+      - uses: actions/checkout@v2
+      - run: cat .env | sed 's/=\" *$/<<EOD/g' | sed 's/^\"/EOD/g' | grep '^[^# ]' >> $GITHUB_ENV
+      - uses: actions/checkout@v2
+        with:
+          ref: ${{ github.event.inputs.repoTag }}
+
+      ###########################
+      #          Check          #
+      ###########################
+      - name: Check to build
+        id: check
+        run: |
+          # [SKIP] Tag is ignored to build.
+          echo -n "$IGNORED_IMAGE_TAGS" > .ignoretags
+          TAG=${{ matrix.version }}-${{ matrix.module }}-${{ github.event.inputs.repoTag }}
+          if [ -n "`echo $TAG | grep -f .ignoretags`" ] ; then
+            echo "::warning::[SKIP] Tag $TAG is ignored to build. Build steps will be skipped.%0A[Ignore tags]%0A`cat .ignoretags`"
+
+          # [SKIP] Image already exists.
+          elif [ `echo "${{ needs.setup.outputs.existTags }}" | cat - | grep -x "$TAG"` ] ; then
+            echo "::warning::[SKIP] Image $EDITOR_IMAGE:$TAG already exists. Build steps will be skipped."
+
+          # Ready to build.
+          else
+            CHANGESET=`npx unity-changeset ${{ matrix.version }}`
+            echo "Image $EDITOR_IMAGE:${TAG} does not exist. Build image.%0A[Change Set] $CHANGESET"
+            echo "::set-output name=changeset::$CHANGESET"
+            if [ "${{ matrix.module }}" = 'base' ] ; then
+              echo "::set-output name=dockerFile::dockerfiles/editor.Dockerfile"
+              echo "::set-output name=dockerTag::${{ matrix.version }}"
+            else
+              echo "::set-output name=dockerFile::dockerfiles/editor_module.Dockerfile"
+              echo "::set-output name=dockerTag::$TAG"
+            fi
+          fi
+
+      ###########################
+      #          Setup          #
+      ###########################
+      - name: Set up QEMU
+        if: steps.check.outputs.changeset != ''
+        uses: docker/setup-qemu-action@v1
+      - name: Set up Docker Buildx
+        if: steps.check.outputs.changeset != ''
+        uses: docker/setup-buildx-action@v1
+        with:
+          buildkitd-flags: --debug
+      - name: Login to docker registry
+        if: steps.check.outputs.changeset != ''
+        uses: docker/login-action@v1
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+      # Cache limitation: 5GB per repo, and 7days.
+      # Do not cache each version because it is too small to install Unity.
+      - name: Cache Docker layers
+        if: steps.check.outputs.changeset != ''
+        uses: actions/cache@v2
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-${{ github.event.inputs.repoTag }}
+          restore-keys: ${{ runner.os }}-
+
+      ###########################
+      #     Free disk space     #
+      ###########################
+      - name: Free disk space
+        if: steps.check.outputs.changeset != ''
+        run: |
+          # Based on:
+          #   https://github.com/apache/flink/blob/master/tools/azure-pipelines/free_disk_space.sh
+          #   https://github.com/actions/virtual-environments/issues/709#issuecomment-612569242
+          echo "==== Disk space before:"
+          df -h
+
+          echo "==== Removing large directories..."
+          rm -rf /usr/share/dotnet/
+          rm -rf /usr/local/share/boost
+          rm -rf "$AGENT_TOOLSDIRECTORY"
+
+          echo "==== Disk space after:"
+          df -h
+
+      ###########################
+      #      Editor image       #
+      ###########################
+      - uses: crazy-max/ghaction-docker-meta@v1
+        id: docker
+        with:
+          images: ${{ env.EDITOR_IMAGE }}
+          tag-custom-only: true
+          tag-custom: |
+            ${{ matrix.version }}-${{ matrix.module }}-${{ github.event.inputs.repoTag }}
+            ${{ matrix.version }}-${{ matrix.module }}
+
+      - name: Build
+        if: steps.check.outputs.changeset != ''
+        uses: docker/build-push-action@v2
+        timeout-minutes: 60
+        with:
+          context: .
+          file: ${{ steps.check.outputs.dockerFile }}
+          build-args: |
+            hubImage=${{ env.HUB_IMAGE }}:${{ github.event.inputs.repoTag }}
+            baseImage=${{ env.BASE_IMAGE }}:${{ github.event.inputs.repoTag }}
+            editorBaseImage=${{ env.EDITOR_IMAGE }}:${{ matrix.version }}
+            version=${{ matrix.version }}
+            changeSet=${{ steps.check.outputs.changeset }}
+            module=${{ matrix.module }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          load: true
+          labels: ${{ steps.docker.outputs.labels }}
+          tags: |
+            ${{ steps.docker.outputs.tags }}
+            ${{ env.EDITOR_IMAGE }}:${{ steps.check.outputs.dockerTag }}
+
+      - name: Push
+        if: steps.check.outputs.changeset != ''
+        run: |
+          # Sometimes the image push fails.
+          #   >> failed commit on ref "layer-sha256:...": no response
+          #   See https://github.com/docker/build-push-action/blob/master/TROUBLESHOOTING.md
+          docker push ${{ env.EDITOR_IMAGE }} \
+            || docker push ${{ env.EDITOR_IMAGE }} \
+            || docker push ${{ env.EDITOR_IMAGE }}
+  # 
+  request-alf:
+    name: Request Activation License File
+    needs: [setup, build]
+    if: always() && needs.setup.outputs.exit != 'true' && github.event.inputs.module == 'base'
+    runs-on: ubuntu-18.04
+    steps:
+      - name: "Dispatch 'Request Activation License File' workflow"
+        uses: benc-uk/workflow-dispatch@v1
+        with:
+          workflow: Request Activation License File
+          token: ${{ secrets.GH_WORKFLOW_TOKEN }}
+          inputs: '{ "repoTag": "${{ github.event.inputs.repoTag }}" }'
+
+  # 
+  build-modules:
+    name: Build Editor
+    needs: [setup, build, request-alf]
+    if: always() && needs.setup.outputs.exit != 'true' && github.event.inputs.module == 'base'
+    runs-on: ubuntu-18.04
+    strategy:
+      matrix:
+        module: [linux-il2cpp, windows-mono, mac-mono, ios, android, webgl]
+    steps:
+      - run: sleep 60
+      - name: Build Editor ${{ matrix.module }}
+        uses: benc-uk/workflow-dispatch@v1
+        with:
+          workflow: Build Editor
+          token: ${{ secrets.GH_WORKFLOW_TOKEN }}
+          inputs: '{ "module": "${{ matrix.module }}", "repoTag": "${{ github.event.inputs.repoTag }}" }'
+          ref: ${{ github.event.inputs.repoTag }}

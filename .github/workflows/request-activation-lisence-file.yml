@@ -1,0 +1,108 @@
+name: "Request Activation License File"
+
+on:
+  workflow_dispatch:
+    inputs:
+      repoTag:
+        description: ""
+        required: true
+
+jobs:
+  setup:
+    name: Setup build matrix
+    runs-on: ubuntu-18.04
+    outputs:
+      matrix: ${{ steps.setup.outputs.matrix }}
+      exit: ${{ steps.setup.outputs.exit }}
+    steps:
+      ###########################
+      #        Setup env        #
+      ###########################
+      - uses: actions/checkout@v2
+      - run: cat .env | sed 's/=\" *$/<<EOD/g' | sed 's/^\"/EOD/g' | grep '^[^# ]' >> $GITHUB_ENV
+
+      ###########################
+      #    Setup build matrix   #
+      ###########################
+      - name: Login to docker registry
+        uses: docker/login-action@v1
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+      - name: Setup build matrix
+        id: setup
+        run: |
+          # Show inputs
+          echo "inputs: ${{ toJson(github.event.inputs) }}"
+
+          REPO_TAG=${{ github.event.inputs.repoTag }}
+
+          echo "###########################################"
+          echo "#       Find available custom image       #"
+          echo "###########################################"
+          echo "docker://$EDITOR_IMAGE*-base-$REPO_TAG"
+          CUSTOM_IMAGES=`skopeo list-tags docker://$EDITOR_IMAGE \
+            | jq -r '.Tags[]' \
+            | grep -v '^ubuntu' \
+            | grep -e "-base-$REPO_TAG$" \
+            | xargs -I {} echo "$EDITOR_IMAGE:{}"`
+
+          [ "$CUSTOM_IMAGES" = '' ] && echo "::warning::No custom images to request." && echo "::set-output name=exit::true" && exit 0
+          echo "$CUSTOM_IMAGES"
+
+
+          echo "###########################################"
+          echo "#            Setup build matrix           #"
+          echo "###########################################"
+          CUSTOM_IMAGES=`echo "$CUSTOM_IMAGES" | paste -s -d ',' - | sed 's/,/\",\"/g' || :`
+          matrix="{ \
+            \"customImage\":[\"$CUSTOM_IMAGES\"] \
+          }"
+          echo "$matrix"
+          echo "::set-output name=matrix::$matrix"
+          echo "::set-output name=exit::false"
+
+  request:
+    name: Request for (${{ matrix.customImage }})
+    needs: setup
+    if: needs.setup.outputs.exit != 'true'
+    runs-on: ubuntu-18.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup.outputs.matrix) }}
+      # The matrix is expanded like this:
+      # matrix:
+      #   customImage:
+      #     - mob-sakai/unity3d:2018.3.0f2-base-v0.7.0
+      #     - mob-sakai/unity3d:2018.3.10f1-base-v0.7.0
+      #     ...
+    steps:
+      - uses: mob-sakai/unity-request-activation-file@custom_image
+        with:
+          customImage: ${{ matrix.customImage }}
+
+      - uses: actions/upload-artifact@v2
+        if: always()
+        with:
+          name: UnityActivationLicenseFiles
+          path: "*.alf"
+
+  release:
+    name: Release ${{ github.event.inputs.repoTag }}
+    if: startsWith(github.event.inputs.repoTag, 'v')
+    needs: [setup, request]
+    runs-on: ubuntu-18.04
+    steps:
+      - uses: actions/download-artifact@v2
+        with:
+          name: UnityActivationLicenseFiles
+          path: UnityActivationLicenseFiles
+
+      - uses: meeDamian/github-release@2.0
+        with:
+          token: ${{ github.token }}
+          tag: ${{ github.event.inputs.repoTag }}
+          gzip: true
+          allow_override: true
+          files: UnityActivationLicenseFiles/
