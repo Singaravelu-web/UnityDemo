@@ -41,7 +41,7 @@ jobs:
       - name: Login to docker registry
         uses: docker/login-action@v1
         with:
-          registry: https://hub.docker.com/
+          #registry: https://hub.docker.com/
           username: techmdemo1
           password: ${{ secrets.DOCKER_PASSWORD }}
       - name: Cache Docker layers
