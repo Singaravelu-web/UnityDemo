@@ -41,9 +41,9 @@ jobs:
       - name: Login to docker registry
         uses: docker/login-action@v1
         with:
-          registry: ${{ env.DOCKER_REGISTRY }}
-          username: ${{ env.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_TOKEN }}
+          registry: velujay@gmail.com
+          username: velublrdocker
+          password: "dckr_pat_KLh_F4KCLKtXNlTLjxN-IaCO8Eg"
       - name: Cache Docker layers
         uses: actions/cache@v2
         with:
