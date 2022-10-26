@@ -95,6 +95,6 @@ jobs:
         uses: benc-uk/workflow-dispatch@v1
         with:
           workflow: Build Editor
-          token: ${{ secrets.GH_WORKFLOW_TOKEN }}
+          #token: ${{ secrets.GH_WORKFLOW_TOKEN }}
           inputs: '{ "module": "base", "repoTag": "${{ steps.latest.outputs.tag }}" }'
           ref: ${{ steps.latest.outputs.tag }}
